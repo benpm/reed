@@ -1,15 +1,16 @@
 use cursive::views::{ScrollView, TextView, TextContent};
 use clap::{App, Arg};
 use std::{io, thread, marker, fs};
-use std::sync::{Arc, atomic, mpsc};
+use std::sync::{Arc, atomic};
 
-unsafe fn spawn_inp_channel<F>(mut file: F, stop: Arc<atomic::AtomicBool>) -> mpsc::Receiver<String>
+const BUFFER_SIZE: usize = 128;
+
+unsafe fn spawn_inp_channel<F>(mut file: F, stop: Arc<atomic::AtomicBool>, content: TextContent)
 where
     F: io::Read,
     F: marker::Send + 'static,
 {
-    // Create a FIFO queue in order to read the contents of the input
-    let (tx, rx) = mpsc::channel::<String>();
+
     /*
     The block below instantiates a thread and iterates over the file to read its content
 
@@ -18,18 +19,21 @@ where
         `loop`: Ensures that the file is continiously looped over.
     */
     thread::spawn(move || loop {
-        // Get a mutable reference to a shared boolean between the threads so that if
+        // Get a mutable reference to a shared boolean between the threads in order to terminate the Thread at a later date
         if stop.load(atomic::Ordering::Relaxed) {
             break;
         }
-        let mut buffer = String::new();
-        if let Err(_s) = file.read(buffer.as_mut_vec()) {
-            panic!("Issue arose in channel thread.")
+        let buffer: &mut [u8; BUFFER_SIZE] = &mut [u8::MAX; BUFFER_SIZE];
+        match file.read(buffer) {
+            Ok(s) => {
+                if s != 0 {
+                    let current_content = content.get_content().source().to_string();
+                    content.set_content(format!("{}{}", current_content, String::from_utf8(buffer[0..s].to_vec()).unwrap()));
+                }
+            },
+            Err(_) => panic!("Issue arose in channel thread.")
         }
-        tx.send(buffer).unwrap();
     });
-
-    rx
 }
 
 fn main() {
@@ -54,37 +58,23 @@ fn main() {
 
     siv.add_global_callback('q', |s| s.quit());
     siv.add_fullscreen_layer(scroll);
-
-    // Instantiate a variable that can contain the front end of the FIFO
-    let _rx: mpsc::Receiver<String>;
+    siv.set_autorefresh(true);
 
     // Create a shared reference to a thread-safe boolean which will inform the other threads to terminate
     let stop_thread = Arc::new(atomic::AtomicBool::new(false));
 
+    // This is needed to accept input as an open pipe or as a path to a file
     unsafe {
         if args.is_present("File") {
             let path = args.value_of("File").unwrap();
             let file = fs::File::open(path).unwrap();
-            _rx = spawn_inp_channel(file, stop_thread.clone());
+            spawn_inp_channel(file, stop_thread.clone(), content.clone());
         } else {
-            _rx = spawn_inp_channel(io::stdin(), stop_thread.clone());
+            spawn_inp_channel(io::stdin(), stop_thread.clone(), content.clone());
         }
     }
 
-    // TODO: Figure out whenever the content of the file updates and read the next part of the queue onto the screen automatically.
-
-    // loop {
-    //     match rx.try_recv() {
-    //         Ok(s) => {
-    //             content.set_content(s);
-    //             siv.step();
-    //         },
-    //         Err(mpsc::TryRecvError::Empty) => {},
-    //         Err(mpsc::TryRecvError::Disconnected) => {},
-    //     }
-    // }
-
-    // // Starts the event loop.
+    // Starts the event loop.
     siv.run();
     stop_thread.store(true, atomic::Ordering::SeqCst);
 }
